@@ -1,6 +1,5 @@
 
-LinuxSimplify - Windows
-
+LinuxSimplify
 A simple app that helps you switch from Windows to GNU/Linux.
 It scans your hardware, recommends a distro that fits your system, downloads it, and flashes it to a USB drive — all in one flow.
 How it works:
@@ -22,7 +21,6 @@ Auto-detects USB drives when plugged in
 Cleans up ISOs after flashing
 
 Supported distros: Ubuntu, Fedora, Linux Mint, Debian, Arch Linux, EndeavourOS, Pop!_OS, Lubuntu, Zorin OS, Trisquel
-
 Requirements: Windows 10/11, admin rights for USB flashing
 License: GNU GPL v3
 Created by @actuallypanmauk (X/Twitter) — helping people switch to GNU/Linux.
