@@ -1,5 +1,5 @@
 
-#LinuxSimplify - Windows
+LinuxSimplify - Windows
 A simple app that helps you switch from Windows to GNU/Linux.
 It scans your hardware, recommends a distro that fits your system, downloads it, and flashes it to a USB drive — all in one flow.
 How it works:
