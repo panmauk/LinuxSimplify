@@ -117,30 +117,6 @@ namespace LinuxSimplify.UI
             };
         }
 
-        // === Fade In ===
-        public static void FadeIn(UIElement element, int delayMs = 0, int durationMs = 300)
-        {
-            element.Opacity = 0;
-            element.RenderTransform = new TranslateTransform(0, 12);
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(delayMs > 0 ? delayMs : 1) };
-            timer.Tick += (s, e) =>
-            {
-                timer.Stop();
-                var anim = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-                double start = Environment.TickCount;
-                anim.Tick += (_, __) =>
-                {
-                    double p = Math.Min(1, (Environment.TickCount - start) / (double)durationMs);
-                    double ease = 1 - (1 - p) * (1 - p);
-                    element.Opacity = ease;
-                    ((TranslateTransform)element.RenderTransform).Y = 12 * (1 - ease);
-                    if (p >= 1) anim.Stop();
-                };
-                anim.Start();
-            };
-            timer.Start();
-        }
-
         // =============================================================
         //  SLIDE TO SCAN
         // =============================================================
@@ -472,54 +448,6 @@ namespace LinuxSimplify.UI
 
             btn.Template = tmpl;
             return btn;
-        }
-
-        // === Glossy Button ===
-        public static Button CreateGlossyButton(string text, bool primary = true)
-        {
-            var btn = new Button
-            {
-                Content = text, Height = 40, Margin = new Thickness(8, 6, 8, 6),
-                FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White, Cursor = Cursors.Hand
-            };
-
-            LinearGradientBrush normalBg, pressedBg;
-            if (primary) { normalBg = MakeGradient(Color.FromRgb(82, 145, 237), Color.FromRgb(52, 115, 207), Color.FromRgb(72, 135, 227)); pressedBg = MakeGradient(Color.FromRgb(62, 125, 217), Color.FromRgb(42, 95, 187), Color.FromRgb(52, 115, 207)); }
-            else { normalBg = MakeGradient(Color.FromRgb(140, 150, 165), Color.FromRgb(110, 120, 135), Color.FromRgb(130, 140, 155)); pressedBg = MakeGradient(Color.FromRgb(120, 130, 145), Color.FromRgb(90, 100, 115), Color.FromRgb(110, 120, 135)); }
-            var disabledBg = MakeGradient(Color.FromRgb(180, 185, 190), Color.FromRgb(160, 165, 170), Color.FromRgb(170, 175, 180));
-
-            var tmpl = new ControlTemplate(typeof(Button));
-            var bdrF = new FrameworkElementFactory(typeof(Border), "btnBorder");
-            bdrF.SetValue(Border.BackgroundProperty, normalBg);
-            bdrF.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
-            bdrF.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(40, 50, 70)));
-            bdrF.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            bdrF.SetValue(Border.EffectProperty, new DropShadowEffect { Color = Colors.Black, Opacity = 0.3, BlurRadius = 4, ShadowDepth = 2 });
-            var cpF = new FrameworkElementFactory(typeof(ContentPresenter));
-            cpF.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            cpF.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            cpF.SetValue(ContentPresenter.EffectProperty, new DropShadowEffect { Color = Color.FromRgb(20, 30, 50), Opacity = 0.7, BlurRadius = 1, ShadowDepth = 1 });
-            bdrF.AppendChild(cpF);
-            tmpl.VisualTree = bdrF;
-
-            var pt = new Trigger { Property = Button.IsPressedProperty, Value = true };
-            pt.Setters.Add(new Setter(Border.BackgroundProperty, pressedBg, "btnBorder"));
-            pt.Setters.Add(new Setter(Border.EffectProperty, new DropShadowEffect { Color = Colors.Black, Opacity = 0.15, BlurRadius = 2, ShadowDepth = 1 }, "btnBorder"));
-            tmpl.Triggers.Add(pt);
-
-            var dt = new Trigger { Property = Button.IsEnabledProperty, Value = false };
-            dt.Setters.Add(new Setter(Border.BackgroundProperty, disabledBg, "btnBorder"));
-            dt.Setters.Add(new Setter(Button.ForegroundProperty, new SolidColorBrush(Color.FromRgb(210, 215, 220))));
-            dt.Setters.Add(new Setter(Button.CursorProperty, Cursors.Arrow));
-            tmpl.Triggers.Add(dt);
-
-            btn.Template = tmpl;
-            return btn;
-        }
-
-        public static LinearGradientBrush MakePubGradient(Color top, Color mid, Color bot)
-        {
-            return MakeGradient(top, mid, bot);
         }
 
         static LinearGradientBrush MakeGradient(Color top, Color mid, Color bot)

@@ -50,6 +50,9 @@ namespace LinuxSimplify.Services
                 ["Trisquel"] = ResolveTrisquel()
             };
 
+            // All resolvers handle their own exceptions, so WhenAll won't throw
+            await Task.WhenAll(tasks.Values);
+
             var results = new Dictionary<string, ResolvedUrl>();
             foreach (var kvp in tasks)
             {

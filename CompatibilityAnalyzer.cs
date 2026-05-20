@@ -159,26 +159,6 @@ namespace LinuxSimplify.Services
             return score;
         }
 
-        public List<DistroCompatibility> GetAllDistrosWithoutHardware()
-        {
-            var results = new List<DistroCompatibility>();
-            foreach (var distro in distroDatabase)
-            {
-                results.Add(new DistroCompatibility
-                {
-                    Name = distro.Name,
-                    CompatibilityStatus = "Unknown",
-                    Notes = "Scan hardware first",
-                    IsRecommended = false,
-                    DownloadUrl = distro.DownloadUrl,
-                    Sha256Url = distro.Sha256Url,
-                    ChecksumType = distro.ChecksumType,
-                    IsSelected = false
-                });
-            }
-            return results;
-        }
-
         private DistroCompatibility AnalyzeDistro(HardwareInfo hw, DistroRequirements distro)
         {
             var notes = new List<string>();
@@ -231,159 +211,159 @@ namespace LinuxSimplify.Services
             }
 
             // ===== RECOMMENDATION ENGINE =====
-            if (!isCompatible) goto Finish;
-
-            bool meetsRec = hw.RamGB >= distro.RecommendedRamGB;
-            var profile = hw.Profile;
-            string n = distro.Name;
-
-            if (n == "Pop!_OS")
+            if (isCompatible)
             {
-                if (hasNvidia && hasGamingGpu)
+                bool meetsRec = hw.RamGB >= distro.RecommendedRamGB;
+                var profile = hw.Profile;
+                string n = distro.Name;
+
+                if (n == "Pop!_OS")
                 {
-                    isRecommended = true;
-                    if (hasHighEndGpu)
-                        notes.Add($"Best pick for your {ShortGpuName(bestGpu.Model)} — drivers preinstalled");
+                    if (hasNvidia && hasGamingGpu)
+                    {
+                        isRecommended = true;
+                        if (hasHighEndGpu)
+                            notes.Add($"Best pick for your {ShortGpuName(bestGpu.Model)} — drivers preinstalled");
+                        else
+                            notes.Add("NVIDIA drivers work right out of the box");
+                    }
+                    else if (hasNvidia)
+                    {
+                        isRecommended = true;
+                        notes.Add("Great NVIDIA support out of the box");
+                    }
+                    else if (meetsRec)
+                        notes.Add("Clean, productivity-focused desktop");
+                }
+                else if (n == "Ubuntu")
+                {
+                    if (profile == SystemProfile.GamingDesktop && hasNvidia && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Large gaming community, easy NVIDIA driver install");
+                    }
+                    else if (profile == SystemProfile.Standard && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Great all-rounder, biggest community");
+                    }
+                    else if (meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Most popular distro, huge community");
+                    }
                     else
-                        notes.Add("NVIDIA drivers work right out of the box");
+                        notes.Add("Popular, well-supported");
                 }
-                else if (hasNvidia)
+                else if (n == "Linux Mint")
                 {
-                    isRecommended = true;
-                    notes.Add("Great NVIDIA support out of the box");
+                    if (profile == SystemProfile.Standard && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Easiest transition from Windows");
+                    }
+                    else if (meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Beginner-friendly, Windows-like feel");
+                    }
+                    else
+                        notes.Add("Very approachable for newcomers");
                 }
-                else if (meetsRec)
-                    notes.Add("Clean, productivity-focused desktop");
-            }
-            else if (n == "Ubuntu")
-            {
-                if (profile == SystemProfile.GamingDesktop && hasNvidia && meetsRec)
+                else if (n == "Fedora")
                 {
-                    isRecommended = true;
-                    notes.Add("Large gaming community, easy NVIDIA driver install");
+                    if (profile == SystemProfile.Workstation && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Great match for workstation hardware");
+                    }
+                    else if (hasAmdDiscrete && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Excellent AMD GPU support with latest drivers");
+                    }
+                    else if (meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Cutting-edge packages, great for developers");
+                    }
+                    else
+                        notes.Add("Backed by Red Hat, latest software");
                 }
-                else if (profile == SystemProfile.Standard && meetsRec)
+                else if (n == "Arch Linux")
                 {
-                    isRecommended = true;
-                    notes.Add("Great all-rounder, biggest community");
+                    if (profile == SystemProfile.GamingDesktop && hasMidRangeOrBetter)
+                        notes.Add($"Rolling release = latest drivers for your {ShortGpuName(bestGpu.Model)}");
+                    else
+                        notes.Add("For advanced users, full control over everything");
                 }
-                else if (meetsRec)
+                else if (n == "EndeavourOS")
                 {
-                    isRecommended = true;
-                    notes.Add("Most popular distro, huge community");
+                    if (profile == SystemProfile.GamingDesktop)
+                    {
+                        isRecommended = true;
+                        notes.Add("Arch-based with latest drivers, easier to set up");
+                    }
+                    else if (hasMidRangeOrBetter && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Rolling release, always latest drivers");
+                    }
+                    else if (meetsRec)
+                        notes.Add("User-friendly way into Arch");
+                    else
+                        notes.Add("Arch-based, good community");
                 }
-                else
-                    notes.Add("Popular, well-supported");
-            }
-            else if (n == "Linux Mint")
-            {
-                if (profile == SystemProfile.Standard && meetsRec)
+                else if (n == "Lubuntu")
                 {
-                    isRecommended = true;
-                    notes.Add("Easiest transition from Windows");
+                    if (profile == SystemProfile.Lightweight || profile == SystemProfile.Legacy)
+                    {
+                        isRecommended = true;
+                        notes.Add("Perfect for your hardware — runs fast with minimal resources");
+                    }
+                    else if (hw.RamGB <= 4)
+                    {
+                        isRecommended = true;
+                        notes.Add("Best choice for low-RAM systems");
+                    }
+                    else if (integratedOnly && hw.RamGB <= 8)
+                        notes.Add("Lightweight, won't tax your integrated graphics");
+                    else
+                        notes.Add("Ultra-lightweight desktop");
                 }
-                else if (meetsRec)
+                else if (n == "Zorin OS")
                 {
-                    isRecommended = true;
-                    notes.Add("Beginner-friendly, Windows-like feel");
+                    if (profile == SystemProfile.Standard && meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Looks and feels like Windows, smooth transition");
+                    }
+                    else if (meetsRec)
+                    {
+                        isRecommended = true;
+                        notes.Add("Designed for Windows users switching to Linux");
+                    }
+                    else
+                        notes.Add("Familiar Windows-like interface");
                 }
-                else
-                    notes.Add("Very approachable for newcomers");
-            }
-            else if (n == "Fedora")
-            {
-                if (profile == SystemProfile.Workstation && meetsRec)
+                else if (n == "Debian")
                 {
-                    isRecommended = true;
-                    notes.Add("Great match for workstation hardware");
+                    if (profile == SystemProfile.Workstation)
+                        notes.Add("Rock-solid stability for production work");
+                    else
+                        notes.Add("Very stable, conservative updates");
                 }
-                else if (hasAmdDiscrete && meetsRec)
+                else if (n == "Trisquel")
                 {
-                    isRecommended = true;
-                    notes.Add("Excellent AMD GPU support with latest drivers");
+                    if (integratedOnly && hw.Gpus.All(g => g.Vendor == "Intel"))
+                        notes.Add("Your Intel GPU works great with free drivers");
+                    else if (hasAmdDiscrete)
+                        notes.Add("AMD GPUs have good open-source drivers");
+                    else
+                        notes.Add("100% free software, no proprietary drivers");
                 }
-                else if (meetsRec)
-                {
-                    isRecommended = true;
-                    notes.Add("Cutting-edge packages, great for developers");
-                }
-                else
-                    notes.Add("Backed by Red Hat, latest software");
-            }
-            else if (n == "Arch Linux")
-            {
-                if (profile == SystemProfile.GamingDesktop && hasMidRangeOrBetter)
-                    notes.Add($"Rolling release = latest drivers for your {ShortGpuName(bestGpu.Model)}");
-                else
-                    notes.Add("For advanced users, full control over everything");
-            }
-            else if (n == "EndeavourOS")
-            {
-                if (profile == SystemProfile.GamingDesktop)
-                {
-                    isRecommended = true;
-                    notes.Add("Arch-based with latest drivers, easier to set up");
-                }
-                else if (hasMidRangeOrBetter && meetsRec)
-                {
-                    isRecommended = true;
-                    notes.Add("Rolling release, always latest drivers");
-                }
-                else if (meetsRec)
-                    notes.Add("User-friendly way into Arch");
-                else
-                    notes.Add("Arch-based, good community");
-            }
-            else if (n == "Lubuntu")
-            {
-                if (profile == SystemProfile.Lightweight || profile == SystemProfile.Legacy)
-                {
-                    isRecommended = true;
-                    notes.Add("Perfect for your hardware — runs fast with minimal resources");
-                }
-                else if (hw.RamGB <= 4)
-                {
-                    isRecommended = true;
-                    notes.Add("Best choice for low-RAM systems");
-                }
-                else if (integratedOnly && hw.RamGB <= 8)
-                    notes.Add("Lightweight, won't tax your integrated graphics");
-                else
-                    notes.Add("Ultra-lightweight desktop");
-            }
-            else if (n == "Zorin OS")
-            {
-                if (profile == SystemProfile.Standard && meetsRec)
-                {
-                    isRecommended = true;
-                    notes.Add("Looks and feels like Windows, smooth transition");
-                }
-                else if (meetsRec)
-                {
-                    isRecommended = true;
-                    notes.Add("Designed for Windows users switching to Linux");
-                }
-                else
-                    notes.Add("Familiar Windows-like interface");
-            }
-            else if (n == "Debian")
-            {
-                if (profile == SystemProfile.Workstation)
-                    notes.Add("Rock-solid stability for production work");
-                else
-                    notes.Add("Very stable, conservative updates");
-            }
-            else if (n == "Trisquel")
-            {
-                if (integratedOnly && hw.Gpus.All(g => g.Vendor == "Intel"))
-                    notes.Add("Your Intel GPU works great with free drivers");
-                else if (hasAmdDiscrete)
-                    notes.Add("AMD GPUs have good open-source drivers");
-                else
-                    notes.Add("100% free software, no proprietary drivers");
             }
 
-            Finish:
             if (isCompatible && notes.Count == 0)
                 notes.Add("Meets all requirements");
 

@@ -123,11 +123,6 @@ namespace LinuxSimplify.Services
             try { return await httpClient.GetStringAsync(url); } catch { return null; }
         }
 
-        public async Task<string> DownloadSha256FileAsync(string url)
-        {
-            return await DownloadChecksumFileAsync(url);
-        }
-
         public async Task<string> ComputeChecksumAsync(string filePath, string algorithm, IProgress<string> statusReporter)
         {
             return await Task.Run(() =>
@@ -147,11 +142,6 @@ namespace LinuxSimplify.Services
                 }
                 catch { return null; }
             });
-        }
-
-        public async Task<string> ComputeSha256Async(string filePath, IProgress<string> statusReporter)
-        {
-            return await ComputeChecksumAsync(filePath, "sha256", statusReporter);
         }
 
         public bool VerifySha256(string computedHash, string checksumFileContent, string isoFileName)
