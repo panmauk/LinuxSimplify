@@ -129,24 +129,21 @@ namespace LinuxSimplify
             }
         }
 
+        private static readonly System.Net.Http.HttpClient connectivityClient =
+            new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+
         private async Task<bool> CheckInternetAsync()
         {
             try
             {
-                using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) })
-                {
-                    var resp = await http.GetAsync("https://www.google.com/generate_204");
-                    return resp.IsSuccessStatusCode;
-                }
+                var resp = await connectivityClient.GetAsync("https://www.google.com/generate_204");
+                return resp.IsSuccessStatusCode;
             }
             catch { }
             try
             {
-                using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) })
-                {
-                    var resp = await http.GetAsync("https://captive.apple.com");
-                    return resp.IsSuccessStatusCode;
-                }
+                var resp = await connectivityClient.GetAsync("https://captive.apple.com");
+                return resp.IsSuccessStatusCode;
             }
             catch { return false; }
         }
@@ -743,14 +740,6 @@ namespace LinuxSimplify
             bg.Children.Add(credits);
 
             rootPanel.Children.Add(bg);
-        }
-
-        private string Fmt(long b)
-        {
-            if (b < 1024) return $"{b} B";
-            if (b < 1048576) return $"{b / 1024.0:F1} KB";
-            if (b < 1073741824) return $"{b / 1048576.0:F1} MB";
-            return $"{b / 1073741824.0:F2} GB";
         }
 
         /// <summary>
