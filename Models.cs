@@ -14,6 +14,8 @@ namespace LinuxSimplify.Models
         public List<GpuInfo> Gpus { get; set; } = new List<GpuInfo>();
         public List<StorageInfo> StorageDevices { get; set; } = new List<StorageInfo>();
         public string BootMode { get; set; } = "";
+        /// <summary>CPU architecture of the scanned machine: "x86_64", "x86", "aarch64", "arm" or "" if unknown.</summary>
+        public string Architecture { get; set; } = "";
         public string SecureBootStatus { get; set; } = "";
         public SystemProfile Profile { get; set; } = SystemProfile.Standard;
     }
@@ -56,12 +58,51 @@ namespace LinuxSimplify.Models
         public string Model { get; set; } = "";
     }
 
+    public class DistroCompatibility : INotifyPropertyChanged
+    {
+        private bool _isSelected;
+        public string Name { get; set; } = "";
+        public string CompatibilityStatus { get; set; } = "";
+        public string Notes { get; set; } = "";
+        public bool IsRecommended { get; set; }
+        public string DownloadUrl { get; set; } = "";
+        public string Sha256Url { get; set; } = "";
+        public string ChecksumType { get; set; } = "sha256";
+        /// <summary>Expected checksum when the source publishes it directly (e.g. Pop!_OS API). Takes precedence over Sha256Url.</summary>
+        public string ExpectedHash { get; set; } = "";
+        public bool IsSelected
+        {
+            get => _isSelected;
+            set { _isSelected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected))); }
+        }
+        public event PropertyChangedEventHandler PropertyChanged;
+    }
+
     public class UsbDrive
     {
         public string DeviceId { get; set; } = "";
         public string Name { get; set; } = "";
         public double SizeGB { get; set; }
+        public long SizeBytes { get; set; }
         public int DiskNumber { get; set; }
+    }
+
+    public class DistroRequirements
+    {
+        public string Name { get; set; } = "";
+        public double MinRamGB { get; set; }
+        public double RecommendedRamGB { get; set; }
+        public double MinStorageGB { get; set; }
+        public bool SupportsProprietaryDrivers { get; set; }
+        public bool GoodForGaming { get; set; }
+        public bool GoodForOldHardware { get; set; }
+        public bool GoodForBeginners { get; set; }
+        public bool GoodForAdvanced { get; set; }
+        public string DownloadUrl { get; set; } = "";
+        public string NvidiaDownloadUrl { get; set; } = "";
+        public string NvidiaSha256Url { get; set; } = "";
+        public string Sha256Url { get; set; } = "";
+        public string ChecksumType { get; set; } = "sha256";
     }
 
     public class DownloadState

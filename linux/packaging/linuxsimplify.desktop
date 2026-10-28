@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LinuxSimplify
+GenericName=USB Installer Creator
+Comment=Pick a Linux distro that fits your PC, download it and write it to a USB drive
+Exec=linuxsimplify
+Icon=linuxsimplify
+Terminal=false
+Categories=Utility;
+Keywords=linux;distro;usb;iso;installer;flash;
+StartupWMClass=linuxsimplify

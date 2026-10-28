@@ -20,7 +20,8 @@ mono_crash.*
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
-# Release/ and Releases/ intentionally removed — bin/ rule above already covers VS build output
+[Rr]elease/
+[Rr]eleases/
 x64/
 x86/
 [Ww][Ii][Nn]32/
@@ -395,16 +396,6 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
-# Published single-file binaries (distribute as GitHub Release assets)
-dist/
-Linux/dist/
-
-# Published single-file binaries — distribute as GitHub Release assets, not in git
-dist/
-Linux/dist/
-/release/*.exe
-/release/linuxsimplify-pmx*
-
 # VS Code files for those working on multiple tools
 .vscode/*
 !.vscode/settings.json
@@ -412,6 +403,9 @@ Linux/dist/
 !.vscode/launch.json
 !.vscode/extensions.json
 !.vscode/*.code-snippets
+
+# Inno Setup compiled installer output
+installer/Output/
 
 # Local History for Visual Studio Code
 .history/

@@ -8,15 +8,29 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Nullable>disable</Nullable>
-    <!-- Ship as one self-contained .exe — no extra files needed on the user's machine. -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <DebugType>none</DebugType>
-    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>1.0.1</Version>
+    <!-- The Linux/Avalonia port lives in linux\ and has its own project; keep its sources and build output out of this one -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);linux/**</DefaultItemExcludes>
   </PropertyGroup>
+  <!-- Release builds: no debug symbols and deterministic, path-mapped compilation, so the published
+       exe never contains source/PDB paths from the build machine (user names, folders). -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildProjectDirectory)=/src</PathMap>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- OpenPGP signature checks of distro downloads (SignatureVerifier.cs) -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Pinned distro signing keys (see SignatureVerifier.cs for where each fingerprint was confirmed) -->
+    <EmbeddedResource Include="keys\*.asc" LogicalName="keys.%(Filename).asc" />
   </ItemGroup>
   <ItemGroup>
     <None Include="app.ico" CopyToOutputDirectory="PreserveNewest" />

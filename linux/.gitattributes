@@ -1,0 +1,5 @@
+# shell scripts, the root helper and packaging metadata must keep LF endings even where git autocrlf is on
+*.sh text eol=lf
+linuxsimplify-flash text eol=lf
+*.policy text eol=lf
+*.desktop text eol=lf

@@ -1,0 +1,215 @@
+#!/bin/sh
+# linuxsimplify-flash - privileged helper for LinuxSimplify: writes an ISO image to a USB drive.
+#
+# Usage:  linuxsimplify-flash [--dry-run] [--test-file] <device> <iso-bytes> <iso-sha256>
+#         the ISO image itself is read from STANDARD INPUT.
+#
+# Security model
+#   * It is started through pkexec (polkit), never directly by the GUI, and it re-validates everything
+#     itself: the GUI is not trusted to have picked a sensible device.
+#   * The ISO arrives on stdin, opened by the *unprivileged* user before pkexec runs. Root therefore never
+#     opens a user-supplied path (no symlink tricks to make root read e.g. /etc/shadow onto a USB stick).
+#   * The device must be a whole, writable, USB/removable disk large enough for the image, and must not
+#     host the running system (/, /boot, /usr, /home, live-medium mounts ...). Partitions that are mounted
+#     under /media, /run/media or /mnt are unmounted; anything mounted elsewhere makes the helper refuse.
+#   * After writing, the written range is read back and its SHA-256 compared with <iso-sha256>.
+#   * --dry-run runs all checks and stops before touching anything (no root needed, nothing is unmounted).
+#   * --test-file writes to a regular file instead of a block device (for testing). It is refused for
+#     /dev paths and refused when running as root.
+#
+# Output protocol (stdout, one item per line):  STAGE <name> | INFO <text> | ERROR: <text> | DONE
+# dd's own "status=progress" output goes to stderr ("<bytes> bytes (...) copied").
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LC_ALL=C
+export LC_ALL
+set -u
+set -f
+
+say() { printf '%s\n' "$*"; }
+fail() { printf 'ERROR: %s\n' "$*"; exit 1; }
+
+DRY=0
+TEST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY=1; shift ;;
+        --test-file) TEST=1; shift ;;
+        --) shift; break ;;
+        -*) fail "unknown option $1" ;;
+        *) break ;;
+    esac
+done
+[ $# -eq 3 ] || fail "usage: linuxsimplify-flash [--dry-run] [--test-file] <device> <iso-bytes> <iso-sha256>"
+
+DEV=$1
+ISOBYTES=$2
+SHA=$3
+
+case "$ISOBYTES" in
+    ''|*[!0-9]*) fail "invalid image size" ;;
+esac
+[ "$ISOBYTES" -ge 1048576 ] 2>/dev/null || fail "image size is implausibly small"
+case "$SHA" in
+    *[!0-9a-fA-F]*) fail "invalid checksum" ;;
+esac
+[ ${#SHA} -eq 64 ] || fail "invalid checksum length"
+SHA=$(printf '%s' "$SHA" | tr 'A-F' 'a-f')
+
+UID_NOW=$(id -u)
+if [ "$TEST" -eq 1 ]; then
+    [ "$UID_NOW" -ne 0 ] || fail "--test-file must not be used as root"
+    case "$DEV" in
+        /dev/*|*[!A-Za-z0-9/_.@+=,:-]*) fail "--test-file target must be a plain file path outside /dev" ;;
+    esac
+    [ ! -b "$DEV" ] && [ ! -c "$DEV" ] || fail "--test-file target is a device"
+elif [ "$DRY" -eq 0 ] && [ "$UID_NOW" -ne 0 ]; then
+    fail "must be run as root (use pkexec)"
+fi
+
+# ---------------------------------------------------------------------------
+#  Validation
+# ---------------------------------------------------------------------------
+MOUNTS_TO_UNMOUNT=""
+
+if [ "$TEST" -eq 0 ]; then
+    case "$DEV" in
+        /dev/*) ;;
+        *) fail "device must be under /dev" ;;
+    esac
+    case "$DEV" in
+        *[!A-Za-z0-9/_.@+=,:-]*) fail "device path contains unexpected characters" ;;
+    esac
+    DEV=$(readlink -f -- "$DEV") || fail "cannot resolve device path"
+    [ -b "$DEV" ] || fail "$DEV is not a block device"
+
+    TYPE=$(lsblk -dno TYPE "$DEV" 2>/dev/null | head -n 1 | tr -d ' ')
+    [ "$TYPE" = "disk" ] || fail "$DEV is not a whole disk (type '$TYPE')"
+    PK=$(lsblk -dno PKNAME "$DEV" 2>/dev/null | head -n 1 | tr -d ' ')
+    [ -z "$PK" ] || fail "$DEV is not a whole disk"
+
+    # (lsblk instead of blockdev: works without root, so --dry-run can run these checks as a normal user)
+    RO=$(lsblk -dno RO "$DEV" 2>/dev/null | head -n 1 | tr -d ' ')
+    case "$RO" in false) RO=0 ;; true) RO=1 ;; esac
+    [ "$RO" = "0" ] || fail "$DEV is read-only (write-protected?)"
+
+    TRAN=$(lsblk -dno TRAN "$DEV" 2>/dev/null | head -n 1 | tr -d ' ')
+    RM=$(lsblk -dno RM "$DEV" 2>/dev/null | head -n 1 | tr -d ' ')
+    case "$RM" in true) RM=1 ;; false) RM=0 ;; esac
+    if [ "$TRAN" != "usb" ] && [ "$RM" != "1" ]; then
+        fail "$DEV is not a USB or removable drive - refusing to write to it"
+    fi
+
+    SIZE=$(lsblk -dnbo SIZE "$DEV" 2>/dev/null | head -n 1 | tr -d ' ')
+    SIZE=${SIZE:-0}
+    [ "$SIZE" -gt 0 ] 2>/dev/null || fail "cannot determine the size of $DEV"
+    [ "$ISOBYTES" -le "$SIZE" ] || fail "the image ($ISOBYTES bytes) is larger than the drive ($SIZE bytes)"
+
+    DISKNAME=${DEV##*/}
+
+    # --- Never touch the disk the running system lives on ---------------------------------------
+    for MP in / /boot /boot/efi /efi /usr /var /home /etc /opt /srv /cdrom /run/live/medium \
+              /run/archiso/bootmnt /lib/live/mount/medium /run/initramfs/live /run/rootfsbase; do
+        SRC=$(findmnt -n -o SOURCE --target "$MP" 2>/dev/null | head -n 1)
+        SRC=${SRC%%\[*}
+        case "$SRC" in
+            /dev/*) ;;
+            *) continue ;;
+        esac
+        # inverse tree: partition -> lvm/crypt -> disk, so LVM/LUKS roots are traced to their physical disks
+        if lsblk -nrs -o NAME,TYPE "$SRC" 2>/dev/null | while read -r N T; do
+                [ "$T" = "disk" ] && [ "$N" = "$DISKNAME" ] && echo hit
+            done | grep -q hit; then
+            fail "$DEV holds the running system ($MP) - refusing to erase it"
+        fi
+    done
+
+    # --- Mounted partitions of the target ----------------------------------------------------------
+    PATHS=$(lsblk -nrlo PATH "$DEV" 2>/dev/null)
+    OLDIFS=$IFS
+    IFS='
+'
+    for P in $PATHS; do
+        if grep -q "^$P " /proc/swaps 2>/dev/null; then
+            fail "$P is in use as swap"
+        fi
+        MPS=$(findmnt -n -o TARGET -S "$P" 2>/dev/null)
+        for M in $MPS; do
+            case "$M" in
+                /media/*|/run/media/*|/mnt/*) MOUNTS_TO_UNMOUNT="$MOUNTS_TO_UNMOUNT
+$M" ;;
+                *) fail "$P is mounted at $M - refusing to erase a drive that is in use by the system" ;;
+            esac
+        done
+    done
+    IFS=$OLDIFS
+fi
+
+if [ "$DRY" -eq 1 ]; then
+    say "STAGE validate"
+    if [ -n "$MOUNTS_TO_UNMOUNT" ]; then
+        IFS='
+'
+        for M in $MOUNTS_TO_UNMOUNT; do [ -n "$M" ] && say "INFO would unmount $M"; done
+        IFS=$OLDIFS
+    fi
+    say "INFO dry run OK: would write $ISOBYTES bytes to $DEV"
+    say "DONE"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+#  Unmount
+# ---------------------------------------------------------------------------
+say "STAGE unmount"
+if [ -n "$MOUNTS_TO_UNMOUNT" ]; then
+    OLDIFS=$IFS
+    IFS='
+'
+    for M in $MOUNTS_TO_UNMOUNT; do
+        [ -n "$M" ] || continue
+        umount -- "$M" 2>/dev/null || fail "could not unmount $M (is a program still using it?)"
+    done
+    IFS=$OLDIFS
+fi
+
+# ---------------------------------------------------------------------------
+#  Write
+# ---------------------------------------------------------------------------
+# O_DIRECT needs block-aligned I/O, including the last (partial) block: only use it when the size allows.
+WFLAG=""
+RFLAGS="fullblock,count_bytes"
+if [ $((ISOBYTES % 4096)) -eq 0 ] && [ "$TEST" -eq 0 ]; then
+    WFLAG="oflag=direct"
+    RFLAGS="direct,fullblock,count_bytes"
+fi
+
+say "STAGE write"
+# stdin = the ISO. count/count_bytes bounds the read to exactly the announced size.
+# shellcheck disable=SC2086
+dd of="$DEV" bs=4M iflag=fullblock,count_bytes count="$ISOBYTES" $WFLAG conv=fsync status=progress || fail "writing to $DEV failed"
+
+say "STAGE sync"
+sync
+if [ "$TEST" -eq 0 ]; then
+    blockdev --flushbufs "$DEV" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+#  Verify by reading back from the device
+# ---------------------------------------------------------------------------
+say "STAGE verify"
+GOT=$(dd if="$DEV" bs=4M iflag="$RFLAGS" count="$ISOBYTES" status=progress | sha256sum | cut -d ' ' -f 1)
+if [ "$GOT" != "$SHA" ]; then
+    fail "verification failed: the data on $DEV does not match the ISO (the drive may be faulty)"
+fi
+
+if [ "$TEST" -eq 0 ]; then
+    # make the kernel notice the new partition table
+    blockdev --rereadpt "$DEV" 2>/dev/null || true
+    udevadm settle -t 5 2>/dev/null || true
+fi
+
+say "DONE"
+exit 0

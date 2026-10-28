@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Panmox</vendor>
+  <vendor_url>https://panmox.org</vendor_url>
+
+  <!-- Run by the LinuxSimplify GUI as: pkexec /opt/linuxsimplify/linuxsimplify-flash <device> <bytes> <sha256>  (ISO on stdin) -->
+  <action id="org.panmox.linuxsimplify.flash">
+    <description>Write a Linux installer image to a USB drive</description>
+    <message>Authentication is required to erase a USB drive and write a Linux installer image to it</message>
+    <icon_name>linuxsimplify</icon_name>
+    <defaults>
+      <!-- never cached, never allowed without an administrator password: this erases a whole disk -->
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/linuxsimplify/linuxsimplify-flash</annotate>
+  </action>
+</policyconfig>

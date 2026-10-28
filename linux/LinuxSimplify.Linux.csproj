@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>linuxsimplify</AssemblyName>
+    <RootNamespace>LinuxSimplify</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Version>1.0.1</Version>
+    <!-- No libicu dependency on the target machine (self-contained builds otherwise need it) -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <!-- Platform-neutral code is shared with the Windows project (..\LinuxSimplify.csproj) -->
+  <ItemGroup>
+    <Compile Include="..\Models.cs" Link="Shared\Models.cs" />
+    <Compile Include="..\CompatibilityAnalyzer.cs" Link="Shared\CompatibilityAnalyzer.cs" />
+    <Compile Include="..\DistroUrlResolver.cs" Link="Shared\DistroUrlResolver.cs" />
+    <Compile Include="..\IsoDownloader.cs" Link="Shared\IsoDownloader.cs" />
+    <Compile Include="..\HardwareClassifier.cs" Link="Shared\HardwareClassifier.cs" />
+    <Compile Include="..\SignatureVerifier.cs" Link="Shared\SignatureVerifier.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- OpenPGP signature checks of distro downloads -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+    <!-- Pinned distro signing keys (see SignatureVerifier.cs for where each fingerprint was confirmed) -->
+    <EmbeddedResource Include="..\keys\*.asc" LogicalName="keys.%(Filename).asc" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="packaging\icons\linuxsimplify-256.png" LogicalName="app.png" />
+    <!-- Helper that pkexec runs as root; ships next to the binary (also used as the inline fallback for AppImage) -->
+    <None Include="packaging\linuxsimplify-flash" Link="linuxsimplify-flash" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

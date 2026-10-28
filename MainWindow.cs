@@ -9,10 +9,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
-using System.Windows.Navigation;
 using System.Windows.Threading;
 using LinuxSimplify.Models;
 using LinuxSimplify.Services;
@@ -23,17 +21,18 @@ namespace LinuxSimplify
     public partial class MainWindow : Window
     {
         private readonly HardwareScanner hardwareScanner;
+        private readonly CompatibilityAnalyzer compatibilityAnalyzer;
         private readonly IsoDownloader isoDownloader;
-        private readonly UsbFlasher usbFlasher;
 
-        private readonly PmxReleaseResolver releaseResolver;
+        private readonly DistroUrlResolver urlResolver;
 
         private HardwareInfo currentHardware;
-        private PmxReleaseResolver.PmxRelease pmxRelease;
+        private List<DistroCompatibility> distroResults;
         private DockPanel rootPanel;
         private StackPanel mainContent;
         private ScrollViewer scrollViewer;
         private CancellationTokenSource downloadCts;
+        private DistroCompatibility selectedDistro;
         private UsbDrive selectedUsbDrive;
         private DownloadState currentDownloadState;
         private string isoFolderPath;
@@ -43,43 +42,17 @@ namespace LinuxSimplify
         private bool isFlashing = false;
         private DispatcherTimer usbPollTimer;
 
-        // Theme switching: renderCurrentPage rebuilds whatever page is showing
-        // when the look is toggled; allowThemeToggle gates it during download/flash.
-        private Action renderCurrentPage;
-        private bool allowThemeToggle = true;
-
-        // PMX OS lives here. The releases are mirrored on GitHub.
-        private const string PmxSiteUrl = "https://panmox.org";
-
         public MainWindow()
         {
             hardwareScanner = new HardwareScanner();
+            compatibilityAnalyzer = new CompatibilityAnalyzer();
             isoDownloader = new IsoDownloader();
-            usbFlasher = new UsbFlasher();
-            releaseResolver = new PmxReleaseResolver();
+            urlResolver = new DistroUrlResolver();
+            distroResults = new List<DistroCompatibility>();
             currentDownloadState = new DownloadState();
 
-            // Environment.ProcessPath is the real .exe location and works even
-            // for single-file publishes (Assembly.Location is empty there).
-            string exeDir = Path.GetDirectoryName(Environment.ProcessPath)
-                            ?? AppContext.BaseDirectory;
-            // Keep ISOs in a writable per-user spot rather than next to the exe,
-            // which may sit in Program Files / a read-only location.
-            string baseDir = string.IsNullOrWhiteSpace(exeDir) ? AppContext.BaseDirectory : exeDir;
-            try
-            {
-                var testProbe = Path.Combine(baseDir, ".pmx_write_test");
-                File.WriteAllText(testProbe, "");
-                File.Delete(testProbe);
-            }
-            catch
-            {
-                // Not writable (e.g. Program Files) — fall back to LocalAppData.
-                baseDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "LinuxSimplify-PMX");
-            }
-            isoFolderPath = Path.Combine(baseDir, "ISO");
+            string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
+            isoFolderPath = Path.Combine(exeDir, "ISO");
 
             InitializeComponent();
             Closing += OnWindowClosing;
@@ -89,7 +62,7 @@ namespace LinuxSimplify
 
         private void InitializeComponent()
         {
-            Title = "LinuxSimplify - PMX";
+            Title = "LinuxSimplify";
             Width = 550; Height = 680;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = UIHelper.CreateLinenBackground();
@@ -99,14 +72,31 @@ namespace LinuxSimplify
 
         private async Task ScanInBackground()
         {
-            // Scan the hardware and find the latest PMX OS release in parallel.
-            var hwTask = hardwareScanner.ScanHardwareAsync();
-            var relTask = releaseResolver.ResolveLatestAsync();
+            // scanComplete MUST end up true whatever happens: the lock screen's slider waits on it, and
+            // an exception here (the task is fire-and-forget) used to leave the app waiting forever.
+            try
+            {
+                // Run hardware scan and URL resolution in parallel
+                var hwTask = hardwareScanner.ScanHardwareAsync();
+                var urlTask = urlResolver.ResolveAllAsync();
 
-            currentHardware = await hwTask;
-            try { pmxRelease = await relTask; } catch { pmxRelease = null; }
+                currentHardware = await hwTask;
+                distroResults = compatibilityAnalyzer.AnalyzeCompatibility(currentHardware);
 
-            scanComplete = true;
+                // Apply resolved URLs (replace hardcoded with live ones)
+                try
+                {
+                    var resolved = await urlTask;
+                    DistroUrlResolver.ApplyResolved(distroResults, resolved, currentHardware.Gpus.Any(g => g.Vendor == "NVIDIA"));
+                }
+                catch { /* URL resolution failed, use hardcoded fallbacks */ }
+
+                selectedDistro = distroResults.FirstOrDefault(d => d.IsRecommended)
+                              ?? distroResults.FirstOrDefault();
+                if (selectedDistro != null) selectedDistro.IsSelected = true;
+            }
+            catch { /* leave whatever we have; pages cope with null/empty results */ }
+            finally { scanComplete = true; }
         }
 
         private void OnWindowClosing(object sender, CancelEventArgs e)
@@ -128,31 +118,40 @@ namespace LinuxSimplify
             }
         }
 
-        private static readonly System.Net.Http.HttpClient connectivityClient =
-            new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        // One shared client — creating (and disposing) a client per check leaks sockets in TIME_WAIT
+        private static readonly System.Net.Http.HttpClient connectivityClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
         private async Task<bool> CheckInternetAsync()
         {
-            try
+            foreach (var url in new[] { "https://www.google.com/generate_204", "https://captive.apple.com" })
             {
-                var resp = await connectivityClient.GetAsync("https://www.google.com/generate_204");
-                return resp.IsSuccessStatusCode;
+                try
+                {
+                    using (var resp = await connectivityClient.GetAsync(url))
+                        if (resp.IsSuccessStatusCode) return true;
+                }
+                catch { }
             }
-            catch { }
-            try
-            {
-                var resp = await connectivityClient.GetAsync("https://captive.apple.com");
-                return resp.IsSuccessStatusCode;
-            }
-            catch { return false; }
+            return false;
         }
 
-        private void SetupPage(string title = "LinuxSimplify - PMX")
+        /// <summary>Awaits a fire-and-forget page task and shows any exception instead of silently losing it.</summary>
+        private async Task RunGuarded(Task task)
+        {
+            try { await task; }
+            catch (Exception ex)
+            {
+                isDownloading = false; isFlashing = false;
+                MessageBox.Show(ex.Message, "LinuxSimplify", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void SetupPage(string title = "LinuxSimplify")
         {
             StopUsbPolling();
             rootPanel.Children.Clear();
             Background = UIHelper.CreateLinenBackground();
-            var nav = UIHelper.CreateNavigationBar(title, BuildThemeToggle());
+            var nav = UIHelper.CreateNavigationBar(title);
             DockPanel.SetDock(nav, Dock.Top);
             rootPanel.Children.Add(nav);
             scrollViewer = new ScrollViewer
@@ -166,87 +165,10 @@ namespace LinuxSimplify
         }
 
         // =============================================================
-        //  THEME TOGGLE (RETRO <-> PMX OS)
-        // =============================================================
-        private string ThemeButtonLabel()
-            => UIHelper.Theme == AppTheme.Retro ? "PMX OS" : "RETRO";
-
-        private Button BuildThemeToggle()
-        {
-            var btn = UIHelper.CreateThemeToggleButton(ThemeButtonLabel());
-            btn.IsEnabled = allowThemeToggle;
-            btn.Click += (s, e) => ToggleTheme();
-            return btn;
-        }
-
-        private void ToggleTheme()
-        {
-            if (!allowThemeToggle) return;
-            UIHelper.Theme = UIHelper.Theme == AppTheme.Retro ? AppTheme.Pmx : AppTheme.Retro;
-            renderCurrentPage?.Invoke();
-        }
-
-        // Page-heading text colour ("Downloading…", "Flashing to USB…") per theme.
-        private Brush HeadingBrush()
-            => new SolidColorBrush(UIHelper.Theme == AppTheme.Pmx
-                ? Color.FromRgb(232, 240, 245)
-                : Color.FromRgb(50, 60, 80));
-
-        // Big brand headline — serif + accent dot in PMX, light sans in Retro.
-        private FrameworkElement BrandHeadline(string text, double fontSize, string kicker, Color dotColor, bool onLightCard = false)
-        {
-            var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
-
-            if (UIHelper.Theme == AppTheme.Pmx)
-            {
-                if (!string.IsNullOrEmpty(kicker))
-                {
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = string.Join(" ", kicker.ToUpper().ToCharArray()),
-                        FontFamily = UIHelper.PmxMono, FontSize = 12,
-                        Foreground = new SolidColorBrush(UIHelper.PmxCyan),
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        Margin = new Thickness(0, 0, 0, 8)
-                    });
-                }
-                var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-                row.Children.Add(new TextBlock
-                {
-                    Text = text, FontFamily = UIHelper.PmxSerif, FontSize = fontSize, FontWeight = FontWeights.Bold,
-                    Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Bottom
-                });
-                row.Children.Add(new System.Windows.Controls.Border
-                {
-                    Width = fontSize * 0.16, Height = fontSize * 0.16,
-                    Background = new SolidColorBrush(dotColor),
-                    CornerRadius = new CornerRadius(1),
-                    VerticalAlignment = VerticalAlignment.Bottom,
-                    Margin = new Thickness(7, 0, 0, fontSize * 0.13)
-                });
-                stack.Children.Add(row);
-            }
-            else
-            {
-                stack.Children.Add(new TextBlock
-                {
-                    Text = text, FontSize = fontSize, FontWeight = FontWeights.Light,
-                    Foreground = onLightCard ? new SolidColorBrush(Color.FromRgb(40, 45, 60)) : Brushes.White,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    Effect = onLightCard ? null : new DropShadowEffect { Color = Colors.Black, Opacity = 0.6, BlurRadius = 4, ShadowDepth = 2 }
-                });
-            }
-            return stack;
-        }
-
-        // =============================================================
         //  PAGE 1: LOCK SCREEN
         // =============================================================
         private void ShowLockScreen()
         {
-            allowThemeToggle = true;
-            renderCurrentPage = ShowLockScreen;
-
             rootPanel.Children.Clear();
             var lockScreen = new Grid { Background = UIHelper.CreateDarkGradientBackground() };
 
@@ -255,7 +177,13 @@ namespace LinuxSimplify
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center
             };
-            titleStack.Children.Add(BrandHeadline("LinuxSimplify", 42, "PANMOX", UIHelper.PmxPink));
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = "LinuxSimplify", FontSize = 42, FontWeight = FontWeights.Light,
+                Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 8),
+                Effect = new DropShadowEffect { Color = Colors.Black, Opacity = 0.6, BlurRadius = 4, ShadowDepth = 2 }
+            });
             lockScreen.Children.Add(titleStack);
 
             var sliderContainer = new StackPanel
@@ -265,28 +193,19 @@ namespace LinuxSimplify
             };
             var slider = UIHelper.CreateSlideToUnlock("slide to scan", async () =>
             {
-                SoundHelper.PlayUnlock();
-                while (!scanComplete) await Task.Delay(50);
-                ShowSpecsPage();
+                // async void under the hood (Action): an escaping exception would crash the app
+                try
+                {
+                    SoundHelper.PlayUnlock();
+                    while (!scanComplete) await Task.Delay(50);
+                    ShowSpecsPage();
+                }
+                catch (Exception ex) { MessageBox.Show(ex.Message, "LinuxSimplify", MessageBoxButton.OK, MessageBoxImage.Error); }
             });
             sliderContainer.Children.Add(slider);
             lockScreen.Children.Add(sliderContainer);
 
-            lockScreen.Children.Add(BuildCornerToggle());
-
             rootPanel.Children.Add(lockScreen);
-        }
-
-        // Theme toggle for the full-screen pages (lock / done) that have no nav bar.
-        private Button BuildCornerToggle()
-        {
-            var btn = UIHelper.CreateThemeToggleButton(ThemeButtonLabel());
-            btn.IsEnabled = allowThemeToggle;
-            btn.Click += (s, e) => ToggleTheme();
-            btn.HorizontalAlignment = HorizontalAlignment.Right;
-            btn.VerticalAlignment = VerticalAlignment.Top;
-            btn.Margin = new Thickness(0, 12, 12, 0);
-            return btn;
         }
 
         // =============================================================
@@ -294,8 +213,6 @@ namespace LinuxSimplify
         // =============================================================
         private void ShowSpecsPage()
         {
-            allowThemeToggle = true;
-            renderCurrentPage = ShowSpecsPage;
             SetupPage();
 
             mainContent.Children.Add(UIHelper.CreateSectionHeader("Your System"));
@@ -327,99 +244,73 @@ namespace LinuxSimplify
 
             var btnP = new StackPanel { Margin = new Thickness(0, 20, 0, 20) };
             var next = UIHelper.CreateDarkNextButton("Next");
-            next.Click += (s, e) => ShowPmxPage();
+            next.Click += (s, e) => ShowDistroPage();
             btnP.Children.Add(next);
             mainContent.Children.Add(btnP);
         }
 
         // =============================================================
-        //  PAGE 3: PMX OS — the one and only distro
+        //  PAGE 3: DISTRO PICKER — recommended on top, no incompatible
         // =============================================================
-        private void ShowPmxPage()
+        private void ShowDistroPage()
         {
-            allowThemeToggle = true;
-            renderCurrentPage = ShowPmxPage;
             SetupPage();
 
-            mainContent.Children.Add(UIHelper.CreateSectionHeader("Install PMX OS"));
-
-            var card = new StackPanel();
-            var headline = BrandHeadline("PMX OS", 32, "PANMOX", UIHelper.PmxPink, onLightCard: true);
-            headline.Margin = new Thickness(0, 16, 0, 2);
-            card.Children.Add(headline);
-
-            bool pmx = UIHelper.Theme == AppTheme.Pmx;
-            var verColor = pmx ? UIHelper.PmxCyan : Color.FromRgb(110, 120, 140);
-            var taglineColor = pmx ? Color.FromRgb(150, 162, 180) : Color.FromRgb(90, 100, 120);
-
-            string ver = (pmxRelease != null && pmxRelease.Resolved && !string.IsNullOrEmpty(pmxRelease.Version))
-                ? pmxRelease.Version : "";
-            card.Children.Add(new TextBlock
+            if (selectedDistro != null && selectedDistro.IsRecommended)
             {
-                Text = string.IsNullOrEmpty(ver) ? "latest release" : $"latest release — {ver}",
-                FontSize = 13,
-                FontFamily = pmx ? UIHelper.PmxMono : null,
-                Foreground = new SolidColorBrush(verColor),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 0, 0, 12)
-            });
-            card.Children.Add(new TextBlock
-            {
-                Text = "A peer-to-peer internet, in an operating system.\nDebian-based, KDE Plasma. No cloud. No telemetry. No boss.",
-                FontSize = 13, FontStyle = FontStyles.Italic,
-                TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap,
-                Foreground = new SolidColorBrush(taglineColor),
-                Margin = new Thickness(16, 0, 16, 16)
-            });
-            mainContent.Children.Add(UIHelper.CreateGroupedSection(card));
-
-            // Status / error line — used when the release can't be reached.
-            var status = new TextBlock
-            {
-                Text = "", FontSize = 12, FontStyle = FontStyles.Italic,
-                Foreground = new SolidColorBrush(Color.FromRgb(180, 90, 60)),
-                TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(20, 10, 20, 0)
-            };
-            mainContent.Children.Add(status);
-
-            if (pmxRelease == null || !pmxRelease.Resolved)
-            {
-                status.Text = (pmxRelease != null && !string.IsNullOrEmpty(pmxRelease.Error))
-                    ? $"Couldn't reach the latest release ({pmxRelease.Error}). Check your connection and try again."
-                    : "Couldn't reach the PMX OS release server. Check your connection and try again.";
+                mainContent.Children.Add(new TextBlock
+                {
+                    Text = $"\u2605  Best pick: {selectedDistro.Name}",
+                    FontSize = 13, FontWeight = FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(Color.FromRgb(80, 150, 50)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(10, 14, 10, 0)
+                });
             }
 
+            mainContent.Children.Add(UIHelper.CreateSectionHeader("Select Distribution"));
+
+            int idx = 0;
+            if (selectedDistro != null)
+            {
+                int fi = distroResults.FindIndex(d => d.Name == selectedDistro.Name);
+                if (fi >= 0) idx = fi;
+            }
+
+            var picker = UIHelper.CreateDistroPickerWidget(distroResults, (sel) =>
+            {
+                foreach (var d in distroResults) d.IsSelected = false;
+                sel.IsSelected = true;
+                selectedDistro = sel;
+                UpdateNotes();
+            }, idx);
+            mainContent.Children.Add(picker);
+
+            var notes = new TextBlock
+            {
+                Text = selectedDistro?.Notes ?? "", FontSize = 12, FontStyle = FontStyles.Italic,
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 110, 130)),
+                TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(20, 6, 20, 4), Tag = "DistroNotes"
+            };
+            mainContent.Children.Add(notes);
+
             var btnP = new StackPanel { Margin = new Thickness(0, 14, 0, 20) };
-            var dl = UIHelper.CreateGreenActionButton("Download PMX OS");
+            var dl = UIHelper.CreateGreenActionButton("Download ISO");
             dl.Click += (s, e) =>
             {
-                if (pmxRelease == null || !pmxRelease.Resolved || pmxRelease.Parts.Count == 0)
-                {
-                    // Network may have just come back — try resolving once more.
-                    _ = RetryResolveThenDownload(status);
-                    return;
-                }
-                _ = DoDownloadAsync();
+                if (selectedDistro == null || isDownloading) return;
+                _ = RunGuarded(DoDownloadAsync());
             };
             btnP.Children.Add(dl);
             mainContent.Children.Add(btnP);
         }
 
-        private async Task RetryResolveThenDownload(TextBlock status)
+        private void UpdateNotes()
         {
-            status.Text = "Looking for the latest release…";
-            try { pmxRelease = await releaseResolver.ResolveLatestAsync(); } catch { }
-            if (pmxRelease != null && pmxRelease.Resolved && pmxRelease.Parts.Count > 0)
-            {
-                _ = DoDownloadAsync();
-            }
-            else
-            {
-                status.Text = (pmxRelease != null && !string.IsNullOrEmpty(pmxRelease.Error))
-                    ? $"Still couldn't reach the latest release ({pmxRelease.Error})."
-                    : "Still couldn't reach the PMX OS release server.";
-            }
+            foreach (var c in mainContent.Children)
+                if (c is TextBlock tb && tb.Tag as string == "DistroNotes")
+                { tb.Text = selectedDistro?.Notes ?? ""; break; }
         }
 
         // =============================================================
@@ -427,8 +318,6 @@ namespace LinuxSimplify
         // =============================================================
         private async Task DoDownloadAsync()
         {
-            allowThemeToggle = false;
-            renderCurrentPage = null;
             SetupPage();
             isDownloading = true;
 
@@ -454,125 +343,98 @@ namespace LinuxSimplify
                 return;
             }
 
-            if (pmxRelease == null || !pmxRelease.Resolved || pmxRelease.Parts.Count == 0)
-            {
-                isDownloading = false;
-                mainContent.Children.Add(new TextBlock
-                {
-                    Text = "Couldn't find the PMX OS release", FontSize = 18, FontWeight = FontWeights.Medium,
-                    Foreground = new SolidColorBrush(Color.FromRgb(200, 60, 60)),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 60, 0, 10)
-                });
-                AddRetry();
-                return;
-            }
+            try { Directory.CreateDirectory(isoFolderPath); } catch { }
 
-            TextBlock al = null, et = null;
+            // Clean old ISOs — move any existing .iso files to recycle bin
+            CleanOldIsos();
+
+            string fn = $"{selectedDistro.Name.Replace(" ", "_")}.iso";
+            downloadedIsoPath = Path.Combine(isoFolderPath, fn);
+            var distro = selectedDistro; // keep a stable reference for the whole download
+
+            var al = new TextBlock
+            {
+                Text = "Downloading\u2026", FontSize = 18, FontWeight = FontWeights.Medium,
+                Foreground = new SolidColorBrush(Color.FromRgb(50, 60, 80)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 40, 0, 20)
+            };
+            mainContent.Children.Add(al);
+
+            var ps = new StackPanel();
+            var pb = UIHelper.CreateProgressBar(); ps.Children.Add(pb);
+            var et = UIHelper.CreateStatusText(""); et.Foreground = new SolidColorBrush(Color.FromRgb(200, 60, 60)); et.FontWeight = FontWeights.SemiBold; ps.Children.Add(et);
+            mainContent.Children.Add(UIHelper.CreateGroupedSection(ps));
+
+            // Verification status text (shown after download)
+            var verifyText = new TextBlock
+            {
+                Text = "", FontSize = 13,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 12, 0, 0)
+            };
+            mainContent.Children.Add(verifyText);
+
+            downloadCts = new CancellationTokenSource();
+
             try
             {
-                try { Directory.CreateDirectory(isoFolderPath); } catch { }
-
-                // Clean old ISOs — move any existing .iso files to recycle bin
-                CleanOldIsos();
-
-                string fn = string.IsNullOrEmpty(pmxRelease.IsoFileName) ? "PMX-OS-amd64.iso" : pmxRelease.IsoFileName;
-                downloadedIsoPath = Path.Combine(isoFolderPath, fn);
-
-                al = new TextBlock
-                {
-                    Text = "Downloading…", FontSize = 18, FontWeight = FontWeights.Medium,
-                    Foreground = HeadingBrush(),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 40, 0, 20)
-                };
-                mainContent.Children.Add(al);
-
-                var ps = new StackPanel();
-                var pb = UIHelper.CreateProgressBar(); ps.Children.Add(pb);
-                var st = UIHelper.CreateStatusText(""); ps.Children.Add(st);
-                et = UIHelper.CreateStatusText(""); et.Foreground = new SolidColorBrush(Color.FromRgb(200, 60, 60)); et.FontWeight = FontWeights.SemiBold; ps.Children.Add(et);
-                mainContent.Children.Add(UIHelper.CreateGroupedSection(ps));
-
-                // Verification status text (shown after download)
-                var verifyText = new TextBlock
-                {
-                    Text = "", FontSize = 13,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 12, 0, 0)
-                };
-                mainContent.Children.Add(verifyText);
-
-                downloadCts = new CancellationTokenSource();
-
-                var prog = new Progress<DownloadState>(s => Dispatcher.Invoke(() =>
+                // Progress<T> invokes this on the UI thread already (it captures the SynchronizationContext)
+                var prog = new Progress<DownloadState>(s =>
                 {
                     currentDownloadState = s; pb.Value = s.Percentage;
-                    if (!string.IsNullOrEmpty(s.CurrentAction)) st.Text = s.CurrentAction;
-                    if (!string.IsNullOrEmpty(s.ErrorMessage)) et.Text = s.ErrorMessage;
-                }));
+                    et.Text = s.ErrorMessage ?? ""; // cleared again once a retry recovers
+                });
 
-                var urls = pmxRelease.Parts.Select(p => p.Url).ToList();
-                bool ok = await isoDownloader.DownloadPartsAsync(urls, downloadedIsoPath, prog, downloadCts.Token);
-                if (!ok) { Dispatcher.Invoke(() => { al.Text = "Download failed"; }); isDownloading = false; AddRetry(); return; }
+                bool ok = await isoDownloader.DownloadIsoAsync(distro.DownloadUrl, downloadedIsoPath, prog, downloadCts.Token);
+                if (!ok) { al.Text = "Download failed"; isDownloading = false; AddRetry(); return; }
 
-                Dispatcher.Invoke(() => { al.Text = "Verifying…"; st.Text = ""; pb.IsIndeterminate = true; });
+                al.Text = "Verifying\u2026"; pb.IsIndeterminate = true;
 
-                bool verified = false;
-                bool checksumAvailable = false;
-
-                if (!string.IsNullOrEmpty(pmxRelease.ChecksumUrl))
-                {
-                    checksumAvailable = true;
-                    var cf = await isoDownloader.DownloadChecksumFileAsync(pmxRelease.ChecksumUrl);
-                    var sp = new Progress<string>(_ => { });
-                    string algo = pmxRelease.ChecksumType ?? "sha256";
-                    var h = await isoDownloader.ComputeChecksumAsync(downloadedIsoPath, algo, sp);
-                    if (cf != null && h != null)
-                    {
-                        verified = isoDownloader.VerifySha256(h, cf, downloadedIsoPath);
-                    }
-                }
+                // Mismatch = the file is corrupt or tampered with. "Unavailable" = nothing to compare against
+                // (no checksum published / couldn't be fetched) - that is reported as such, not as a failure.
+                // (also checks the distro's OpenPGP signature where one is published)
+                var verification = await isoDownloader.VerifyIsoAsync(downloadedIsoPath, distro.Name, distro.DownloadUrl,
+                    distro.Sha256Url, distro.ChecksumType, distro.ExpectedHash);
+                var status = verification.Status;
 
                 isDownloading = false;
+                pb.IsIndeterminate = false;
+                pb.Value = 100;
 
-                Dispatcher.Invoke(() =>
+                if (status == ChecksumStatus.Mismatch)
                 {
-                    pb.IsIndeterminate = false;
-                    pb.Value = 100;
-                    al.Text = "Download complete";
+                    // Never offer a file that failed its checksum or signature for flashing
+                    try { File.Delete(downloadedIsoPath); } catch { }
+                    al.Text = "Download is corrupted";
+                    verifyText.Text = verification.Message;
+                    verifyText.Foreground = new SolidColorBrush(Color.FromRgb(200, 60, 60));
+                    verifyText.FontWeight = FontWeights.SemiBold;
+                    AddRetry();
+                    return;
+                }
 
-                    if (checksumAvailable)
-                    {
-                        if (verified)
-                        {
-                            verifyText.Text = "✓ Download is safe";
-                            verifyText.Foreground = new SolidColorBrush(Color.FromRgb(80, 150, 50));
-                            verifyText.FontWeight = FontWeights.SemiBold;
-                        }
-                        else
-                        {
-                            verifyText.Text = "⚠ Download might not be safe";
-                            verifyText.Foreground = new SolidColorBrush(Color.FromRgb(200, 150, 30));
-                            verifyText.FontWeight = FontWeights.SemiBold;
-                        }
-                    }
-                    else
-                    {
-                        verifyText.Text = "Could not verify download";
-                        verifyText.Foreground = new SolidColorBrush(Color.FromRgb(140, 145, 155));
-                    }
+                al.Text = "Download complete";
+                verifyText.Text = verification.Message;
+                if (status == ChecksumStatus.Verified)
+                {
+                    verifyText.Foreground = new SolidColorBrush(Color.FromRgb(80, 150, 50));
+                    verifyText.FontWeight = FontWeights.SemiBold;
+                }
+                else
+                {
+                    verifyText.Foreground = new SolidColorBrush(Color.FromRgb(140, 145, 155));
+                }
 
-                    // Next button — user decides when to proceed
-                    var btnP = new StackPanel { Margin = new Thickness(0, 20, 0, 20) };
-                    var next = UIHelper.CreateDarkNextButton("Next");
-                    next.Click += (s, e) => ShowFlashPrompt();
-                    btnP.Children.Add(next);
-                    mainContent.Children.Add(btnP);
-                });
+                // Next button - user decides when to proceed
+                var btnP = new StackPanel { Margin = new Thickness(0, 20, 0, 20) };
+                var next = UIHelper.CreateDarkNextButton("Next");
+                next.Click += (s, e) => ShowFlashPrompt();
+                btnP.Children.Add(next);
+                mainContent.Children.Add(btnP);
             }
-            catch (OperationCanceledException) { isDownloading = false; Dispatcher.Invoke(() => { if (al != null) al.Text = "Cancelled"; }); AddRetry(); }
-            catch (Exception ex) { isDownloading = false; Dispatcher.Invoke(() => { if (al != null) al.Text = "Download failed"; if (et != null) et.Text = ex.Message; }); AddRetry(); }
+            catch (OperationCanceledException) { isDownloading = false; al.Text = "Cancelled"; AddRetry(); }
+            catch (Exception ex) { isDownloading = false; al.Text = "Download failed"; et.Text = ex.Message; AddRetry(); }
         }
 
         private void AddRetry()
@@ -581,7 +443,7 @@ namespace LinuxSimplify
             {
                 var p = new StackPanel { Margin = new Thickness(0, 14, 0, 15) };
                 var b = UIHelper.CreateDarkNextButton("Try Again");
-                b.Click += (s, e) => ShowPmxPage();
+                b.Click += (s, e) => ShowDistroPage();
                 p.Children.Add(b);
                 mainContent.Children.Add(p);
             });
@@ -592,8 +454,6 @@ namespace LinuxSimplify
         // =============================================================
         private void ShowFlashPrompt()
         {
-            allowThemeToggle = true;
-            renderCurrentPage = ShowFlashPrompt;
             SetupPage();
 
             var c = new StackPanel { Margin = new Thickness(0, 80, 0, 0) };
@@ -605,7 +465,7 @@ namespace LinuxSimplify
 
             c.Children.Add(new TextBlock
             {
-                Text = "⚠ This will erase everything on the USB drive",
+                Text = "\u26A0 This will erase everything on the USB drive",
                 FontSize = 12, Foreground = new SolidColorBrush(Color.FromRgb(200, 60, 60)),
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 12, 0, 0)
@@ -625,8 +485,6 @@ namespace LinuxSimplify
 
         private void ShowUsbSelect()
         {
-            allowThemeToggle = true;
-            renderCurrentPage = ShowUsbSelect;
             StopUsbPolling();
             SetupPage();
             mainContent.Children.Add(UIHelper.CreateSectionHeader("Choose USB Drive"));
@@ -634,7 +492,7 @@ namespace LinuxSimplify
             usbListPanel = new StackPanel();
             usbEmptyText = new TextBlock
             {
-                Text = "Plug in a USB drive…",
+                Text = "Plug in a USB drive\u2026",
                 FontSize = 14, FontStyle = FontStyles.Italic,
                 Foreground = new SolidColorBrush(Color.FromRgb(120, 125, 140)),
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -653,7 +511,7 @@ namespace LinuxSimplify
             {
                 if (selectedUsbDrive == null) return;
                 StopUsbPolling();
-                _ = DoFlashAsync();
+                _ = RunGuarded(DoFlashAsync());
             };
             bp.Children.Add(usbNextButton);
             mainContent.Children.Add(bp);
@@ -669,7 +527,7 @@ namespace LinuxSimplify
             usbPollTimer.Start();
         }
 
-        private bool usbRefreshing = false;
+        private volatile bool usbRefreshing = false;
         private void RefreshUsbList()
         {
             if (usbRefreshing) return; // Skip if previous refresh still running
@@ -680,19 +538,24 @@ namespace LinuxSimplify
                 try
                 {
                     var drives = hardwareScanner.GetUsbDrives();
-                    Dispatcher.Invoke(() =>
+                    Dispatcher.BeginInvoke(new Action(() =>
                     {
                         try
                         {
-                            // Check if list changed (compare by disk number)
-                            var currentIds = drives.Select(d => d.DiskNumber).OrderBy(x => x).ToList();
-                            var lastIds = lastKnownDrives.Select(d => d.DiskNumber).OrderBy(x => x).ToList();
+                            // The user may have moved on (Next / back) while the scan ran. Touching state then would
+                            // null out selectedUsbDrive right before DoFlashAsync reads it, or edit a page that is gone.
+                            if (usbPollTimer == null || usbListPanel == null) return;
+
+                            // Check if list changed (identity = disk number + device id + size, so swapping one stick for another is noticed)
+                            Func<UsbDrive, string> key = d => $"{d.DiskNumber}|{d.DeviceId}|{d.SizeBytes}|{d.Name}";
+                            var currentIds = drives.Select(key).OrderBy(x => x).ToList();
+                            var lastIds = lastKnownDrives.Select(key).OrderBy(x => x).ToList();
                             if (currentIds.SequenceEqual(lastIds)) return; // No change
 
                             lastKnownDrives = drives;
 
                             // Remember current selection
-                            int selectedDisk = selectedUsbDrive?.DiskNumber ?? -1;
+                            string selectedKey = selectedUsbDrive != null ? key(selectedUsbDrive) : null;
                             selectedUsbDrive = null;
 
                             usbListPanel.Children.Clear();
@@ -713,7 +576,7 @@ namespace LinuxSimplify
                                 var drive = d;
                                 r.Checked += (s, e) => { selectedUsbDrive = drive; usbNextButton.IsEnabled = true; };
 
-                                if (d.DiskNumber == selectedDisk)
+                                if (key(d) == selectedKey)
                                 {
                                     r.IsChecked = true;
                                     selectedUsbDrive = d;
@@ -729,7 +592,7 @@ namespace LinuxSimplify
                             usbNextButton.IsEnabled = selectedUsbDrive != null;
                         }
                         catch { }
-                    });
+                    }));
                 }
                 catch { }
                 finally { usbRefreshing = false; }
@@ -750,15 +613,13 @@ namespace LinuxSimplify
         // =============================================================
         private async Task DoFlashAsync()
         {
-            allowThemeToggle = false;
-            renderCurrentPage = null;
             SetupPage();
             isFlashing = true;
 
             var al = new TextBlock
             {
-                Text = "Flashing to USB…", FontSize = 18, FontWeight = FontWeights.Medium,
-                Foreground = HeadingBrush(),
+                Text = "Flashing to USB\u2026", FontSize = 18, FontWeight = FontWeights.Medium,
+                Foreground = new SolidColorBrush(Color.FromRgb(50, 60, 80)),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 40, 0, 20)
             };
@@ -769,25 +630,44 @@ namespace LinuxSimplify
             var et = UIHelper.CreateStatusText(""); et.Foreground = new SolidColorBrush(Color.FromRgb(200, 60, 60)); et.FontWeight = FontWeights.SemiBold; ps.Children.Add(et);
             mainContent.Children.Add(UIHelper.CreateGroupedSection(ps));
 
-            var fp = new Progress<string>(msg => Dispatcher.Invoke(() =>
+            var fp = new Progress<string>(msg =>
             {
                 if (msg.StartsWith("Flashing..."))
                 {
                     var p = msg.Replace("Flashing... ", "").Replace("%", "").Trim();
+                    if (int.TryParse(p, out int v)) { al.Text = "Flashing to USB\u2026"; pb.Value = v; }
+                }
+                else if (msg.StartsWith("Verifying..."))
+                {
+                    var p = msg.Replace("Verifying... ", "").Replace("%", "").Trim();
+                    al.Text = "Verifying USB\u2026";
                     if (int.TryParse(p, out int v)) pb.Value = v;
                 }
-                else if (msg.Contains("ERROR")) { al.Text = "Flash failed"; et.Text = msg.Replace("ERROR: ", ""); }
-            }));
+                else if (msg.StartsWith("ERROR")) { al.Text = "Flash failed"; et.Text = msg.Replace("ERROR: ", ""); }
+            });
 
-            bool ok = await usbFlasher.FlashIsoToUsbAsync(
-                downloadedIsoPath, selectedUsbDrive.DiskNumber,
+            var target = selectedUsbDrive;
+            if (target == null)
+            {
+                isFlashing = false;
+                al.Text = "Flash failed";
+                et.Text = "No USB drive selected";
+                var bp0 = new StackPanel { Margin = new Thickness(0, 14, 0, 15) };
+                var b0 = UIHelper.CreateDarkNextButton("Try Again");
+                b0.Click += (s2, e2) => ShowFlashPrompt();
+                bp0.Children.Add(b0);
+                mainContent.Children.Add(bp0);
+                return;
+            }
+
+            // The app runs as a normal user; this asks for administrator rights (UAC) just for the write
+            bool ok = await ElevatedFlash.FlashAsync(
+                downloadedIsoPath, target,
                 currentHardware?.BootMode == "UEFI", fp);
 
             if (ok)
             {
                 isFlashing = false;
-                // Flashing is done — no need to keep a couple of GB on disk.
-                DeleteDownloadedIso();
                 await Task.Delay(300);
                 ShowDonePage();
             }
@@ -811,8 +691,8 @@ namespace LinuxSimplify
         // =============================================================
         private void ShowDonePage()
         {
-            allowThemeToggle = true;
-            renderCurrentPage = ShowDonePage;
+            // Delete the ISO — flashing is done, no need to keep 5GB on disk
+            DeleteDownloadedIso();
 
             rootPanel.Children.Clear();
 
@@ -824,35 +704,21 @@ namespace LinuxSimplify
                 HorizontalAlignment = HorizontalAlignment.Center
             };
 
-            var brand = BrandHeadline("PMX OS", 36, "PANMOX", UIHelper.PmxPink);
-            brand.Margin = new Thickness(0, 0, 0, 20);
-            center.Children.Add(brand);
+            center.Children.Add(new TextBlock
+            {
+                Text = "LinuxSimplify", FontSize = 36, FontWeight = FontWeights.Light,
+                Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 20),
+                Effect = new DropShadowEffect { Color = Colors.Black, Opacity = 0.5, BlurRadius = 4, ShadowDepth = 2 }
+            });
 
             center.Children.Add(new TextBlock
             {
                 Text = "Ready to boot from USB", FontSize = 16,
-                FontFamily = UIHelper.Theme == AppTheme.Pmx ? UIHelper.PmxMono : null,
                 Foreground = new SolidColorBrush(Color.FromRgb(200, 205, 215)),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 0, 0, 14)
+                Margin = new Thickness(0, 0, 0, 40)
             });
-
-            // Link to the project's home — panmox.org
-            var linkBlock = new TextBlock
-            {
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 0, 0, 36)
-            };
-            var link = new Hyperlink(new Run("panmox.org"))
-            {
-                NavigateUri = new Uri(PmxSiteUrl),
-                Foreground = new SolidColorBrush(UIHelper.Theme == AppTheme.Pmx ? UIHelper.PmxCyan : Color.FromRgb(140, 200, 255)),
-                FontSize = 15
-            };
-            if (UIHelper.Theme == AppTheme.Pmx) linkBlock.FontFamily = UIHelper.PmxMono;
-            link.RequestNavigate += OnRequestNavigate;
-            linkBlock.Inlines.Add(link);
-            center.Children.Add(linkBlock);
 
             var doneBtn = UIHelper.CreateDarkNextButton("DONE");
             doneBtn.Width = 300; doneBtn.Height = 52; doneBtn.FontSize = 22;
@@ -878,7 +744,7 @@ namespace LinuxSimplify
             });
             credits.Children.Add(new TextBlock
             {
-                Text = "Debian underneath.",
+                Text = "helping people switch to GNU/Linux",
                 FontSize = 11, FontStyle = FontStyles.Italic,
                 Foreground = new SolidColorBrush(Color.FromRgb(140, 145, 158)),
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -886,30 +752,27 @@ namespace LinuxSimplify
             });
             credits.Children.Add(new TextBlock
             {
-                Text = "© 2025 PMX OS — GNU GPL v3",
+                Text = "\u00A9 2025 LinuxSimplify \u2014 GNU GPL v3",
                 FontSize = 11,
                 Foreground = new SolidColorBrush(Color.FromRgb(130, 135, 148)),
                 HorizontalAlignment = HorizontalAlignment.Center
             });
             bg.Children.Add(credits);
-            bg.Children.Add(BuildCornerToggle());
 
             rootPanel.Children.Add(bg);
         }
 
-        private void OnRequestNavigate(object sender, RequestNavigateEventArgs e)
+        private string Fmt(long b)
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
-            }
-            catch { }
-            e.Handled = true;
+            if (b < 1024) return $"{b} B";
+            if (b < 1048576) return $"{b / 1024.0:F1} KB";
+            if (b < 1073741824) return $"{b / 1048576.0:F1} MB";
+            return $"{b / 1073741824.0:F2} GB";
         }
 
         /// <summary>
         /// Deletes the downloaded ISO after successful flash.
-        /// No reason to keep a couple of GB sitting around.
+        /// No reason to keep 2-5 GB sitting around.
         /// </summary>
         private void DeleteDownloadedIso()
         {
@@ -942,9 +805,10 @@ namespace LinuxSimplify
                         // If recycle bin fails, just delete
                         try { File.Delete(f); } catch { }
                     }
+                    if (File.Exists(f)) { try { File.Delete(f); } catch { } }
                 }
                 // Also clean partial downloads
-                var partials = Directory.GetFiles(isoFolderPath, "*.iso.tmp");
+                var partials = Directory.GetFiles(isoFolderPath, "*.iso.part");
                 foreach (var f in partials)
                 {
                     try { File.Delete(f); } catch { }
@@ -983,7 +847,11 @@ namespace LinuxSimplify
                 pFrom = filePath + '\0' + '\0',  // Double-null terminated
                 fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
             };
-            SHFileOperation(ref fs);
+            // SHFileOperation reports failure through its return value, not by throwing. Ignoring it meant the
+            // ISO silently stayed on disk, so surface it and let the caller fall back to a plain delete.
+            int rc = SHFileOperation(ref fs);
+            if (rc != 0 || fs.fAnyOperationsAborted)
+                throw new IOException($"Recycle bin operation failed ({rc})");
         }
     }
 }
